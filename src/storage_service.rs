@@ -42,7 +42,7 @@ use crate::configuration::Endpoint;
 use crate::master_key::StorageServiceKey;
 use crate::proto::{
     ManifestRecord, ReadOperation, StorageItem, StorageItems, StorageManifest,
-    StorageRecord,
+    StorageRecord, WriteOperation,
 };
 use crate::push_service::protobuf::ProtobufResponseExt;
 use crate::push_service::SignalServiceResponse;
@@ -216,6 +216,83 @@ impl StorageService {
     // -- crypto ------------------------------------------------------------
 
     /// Decrypt a [`StorageManifest`] into a [`ManifestRecord`].
+    /// Like [`StorageService::read_items`], but each record as its decrypted
+    /// bytes, with its key. A client changing a record should change these
+    /// bytes, so fields it doesn't know survive.
+    pub async fn read_items_raw(
+        &self,
+        keys: Vec<Vec<u8>>,
+        record_ikm: Option<&[u8]>,
+    ) -> Result<Vec<(Vec<u8>, Vec<u8>)>, StorageServiceError> {
+        let body = ReadOperation { read_key: keys };
+        let items: StorageItems = self
+            .service
+            .request(
+                Method::PUT,
+                Endpoint::storage("/v1/storage/read"),
+                HttpAuthOverride::Identified(self.credentials.clone()),
+            )?
+            .header("Content-Type", "application/x-protobuf")
+            .body(body.encode_to_vec())
+            .send()
+            .await?
+            .service_error_for_status()
+            .await?
+            .protobuf()
+            .await?;
+        items
+            .items
+            .iter()
+            .map(|item| {
+                let key =
+                    Self::item_key(&self.storage_key, &item.key, record_ikm);
+                Ok((item.key.clone(), decrypt(&key, &item.value)?))
+            })
+            .collect()
+    }
+
+    /// Encrypts record bytes (see [`StorageService::read_items_raw`]).
+    pub fn encrypt_item_raw(
+        storage_key: &StorageServiceKey,
+        raw_id: Vec<u8>,
+        plaintext: &[u8],
+        record_ikm: Option<&[u8]>,
+    ) -> StorageItem {
+        let key = Self::item_key(storage_key, &raw_id, record_ikm);
+        StorageItem {
+            key: raw_id,
+            value: encrypt(&key, plaintext),
+        }
+    }
+
+    pub fn storage_key(&self) -> &StorageServiceKey {
+        &self.storage_key
+    }
+
+    /// Writes a new manifest with its changed items. `Ok(false)`: someone
+    /// else wrote first (409); read the manifest again and redo the change.
+    pub async fn write(
+        &self,
+        operation: &WriteOperation,
+    ) -> Result<bool, StorageServiceError> {
+        let response = self
+            .service
+            .request(
+                Method::PUT,
+                Endpoint::storage("/v1/storage"),
+                HttpAuthOverride::Identified(self.credentials.clone()),
+            )?
+            .header("Content-Type", "application/x-protobuf")
+            .body(operation.encode_to_vec())
+            .send()
+            .await?;
+        if response.status().as_u16() == 409 {
+            return Ok(false);
+        }
+        response.service_error_for_status().await?;
+        Ok(true)
+    }
+
     pub fn decrypt_manifest(
         storage_key: &StorageServiceKey,
         manifest: &StorageManifest,
@@ -390,6 +467,24 @@ mod tests {
         );
         assert_eq!(
             StorageService::decrypt_item(&storage_key, &modern, Some(&ikm))
+                .unwrap(),
+            record
+        );
+    }
+
+    #[test]
+    fn raw_items_decrypt_like_decoded_ones() {
+        let storage_key = StorageServiceKey { inner: [9u8; 32] };
+        let ikm = [4u8; 32];
+        let record = StorageRecord { record: None };
+        let item = StorageService::encrypt_item_raw(
+            &storage_key,
+            vec![1u8; 16],
+            &record.encode_to_vec(),
+            Some(&ikm),
+        );
+        assert_eq!(
+            StorageService::decrypt_item(&storage_key, &item, Some(&ikm))
                 .unwrap(),
             record
         );
