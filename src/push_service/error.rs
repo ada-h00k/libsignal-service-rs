@@ -183,6 +183,10 @@ pub enum ServiceError {
     DeviceTransferAvailable,
     #[error("no username hash is set for this account")]
     UsernameHashNotSet,
+    #[error("username is not available")]
+    UsernameTaken,
+    #[error("username reservation expired or invalid")]
+    UsernameReservationInvalid,
     #[error("attachment too large")]
     AttachmentTooLarge,
     #[error("challenge token not accepted")]

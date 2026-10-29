@@ -197,7 +197,151 @@ fn parse_username_link(
     Ok((handle_uuid, *entropy))
 }
 
+// Signal-Server: controllers/AccountController.java
+// (PUT /v1/accounts/username_hash/reserve)
+error_mapper! {
+    reserve_username_errors:
+        // none of the hashes is free
+        CONFLICT => UsernameTaken,
+}
+
+// (PUT /v1/accounts/username_hash/confirm)
+error_mapper! {
+    confirm_username_errors:
+        // no (matching) reservation any more
+        CONFLICT => UsernameReservationInvalid,
+        // the username can't be used
+        GONE => UsernameTaken,
+}
+
 impl SignalWebSocket<Identified> {
+    /// Reserves the first free one of `hashes` and returns it.
+    // Based on libsignal-net
+    pub async fn reserve_username_hash(
+        &mut self,
+        hashes: &[[u8; 32]],
+    ) -> Result<[u8; 32], ServiceError> {
+        #[derive(Serialize)]
+        #[serde(rename_all = "camelCase")]
+        struct ReserveRequest {
+            username_hashes: Vec<String>,
+        }
+
+        #[derive(serde::Deserialize)]
+        #[serde(rename_all = "camelCase")]
+        struct ReserveResponse {
+            #[serde(with = "serde_base64_url_safe_no_pad")]
+            username_hash: Vec<u8>,
+        }
+
+        let response = self
+            .http_request(Method::PUT, "/v1/accounts/username_hash/reserve")?
+            .send_json(ReserveRequest {
+                username_hashes: hashes
+                    .iter()
+                    .map(|h| BASE64_URL_SAFE_NO_PAD.encode(h))
+                    .collect(),
+            })
+            .await?
+            .service_error_for_status_with(reserve_username_errors)
+            .await?;
+        let result: ReserveResponse = response.json().await?;
+        result
+            .username_hash
+            .try_into()
+            .map_err(|_| ServiceError::InvalidFrame {
+                reason: "reserved username hash is not 32 bytes",
+            })
+    }
+
+    /// Makes a reserved username the account's, with its link encrypted
+    /// value (see `usernames::create_for_username`); returns the link handle.
+    // Based on libsignal-net
+    pub async fn confirm_username_hash(
+        &mut self,
+        hash: &[u8; 32],
+        proof: &[u8],
+        encrypted_username: &[u8],
+    ) -> Result<uuid::Uuid, ServiceError> {
+        #[derive(Serialize)]
+        #[serde(rename_all = "camelCase")]
+        struct ConfirmRequest {
+            username_hash: String,
+            zk_proof: String,
+            encrypted_username: String,
+        }
+
+        #[derive(serde::Deserialize)]
+        #[serde(rename_all = "camelCase")]
+        struct ConfirmResponse {
+            username_link_handle: Option<uuid::Uuid>,
+        }
+
+        let response = self
+            .http_request(Method::PUT, "/v1/accounts/username_hash/confirm")?
+            .send_json(ConfirmRequest {
+                username_hash: BASE64_URL_SAFE_NO_PAD.encode(hash),
+                zk_proof: BASE64_URL_SAFE_NO_PAD.encode(proof),
+                encrypted_username: BASE64_URL_SAFE_NO_PAD.encode(encrypted_username),
+            })
+            .await?
+            .service_error_for_status_with(confirm_username_errors)
+            .await?;
+        let result: ConfirmResponse = response.json().await?;
+        result.username_link_handle.ok_or(ServiceError::InvalidFrame {
+            reason: "confirmed username without a link handle",
+        })
+    }
+
+    /// Sets the account's username, as Signal's apps do: a nickname without a
+    /// discriminator gets the first free one of a set of random candidates,
+    /// "nickname.42" is taken as it is. Returns the username and its link.
+    pub async fn set_username(
+        &mut self,
+        nickname: &str,
+    ) -> Result<(usernames::Username, url::Url), ServiceError> {
+        let invalid = |_| ServiceError::InvalidFrame {
+            reason: "invalid username",
+        };
+        let candidates: Vec<usernames::Username> = if nickname.contains('.') {
+            vec![usernames::Username::new(nickname).map_err(invalid)?]
+        } else {
+            usernames::Username::candidates_from(
+                &mut rand::rng(),
+                nickname,
+                usernames::NicknameLimits::default(),
+            )
+            .map_err(invalid)?
+            .iter()
+            .map(|c| usernames::Username::new(c))
+            .collect::<Result<_, _>>()
+            .map_err(invalid)?
+        };
+        let hashes: Vec<[u8; 32]> = candidates.iter().map(|c| c.hash()).collect();
+        let reserved = self.reserve_username_hash(&hashes).await?;
+        let username = candidates
+            .into_iter()
+            .find(|c| c.hash() == reserved)
+            .ok_or(ServiceError::InvalidFrame {
+                reason: "server reserved a username hash that was not asked for",
+            })?;
+
+        let mut randomness = [0u8; 32];
+        rand::Rng::fill(&mut rand::rng(), &mut randomness);
+        let proof = username.proof(&randomness).map_err(invalid)?;
+        let (entropy, encrypted) = usernames::create_for_username(
+            &mut rand::rng(),
+            username.to_string(),
+            None,
+        )
+        .map_err(|_e| ServiceError::InvalidFrame {
+            reason: "username too long to encrypt",
+        })?;
+        let handle = self
+            .confirm_username_hash(&reserved, &proof, &encrypted)
+            .await?;
+        Ok((username, generate_username_link(handle, &entropy)))
+    }
     /// Sets the account's username link to encrypt `username` and returns the
     /// shareable `https://signal.me/#eu/...` link.
     ///
