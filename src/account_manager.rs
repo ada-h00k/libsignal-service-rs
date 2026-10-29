@@ -573,12 +573,24 @@ impl AccountManager {
         let about_emoji = about_emoji.unwrap_or_default();
         let about_emoji = profile_cipher.encrypt_emoji(about_emoji, csprng)?;
 
-        // If avatar -> upload
-        if matches!(avatar, AvatarWrite::NewAvatar(_)) {
-            // FIXME ProfileCipherOutputStream.java
-            // It's just AES GCM, but a bit of work to decently implement it with a stream.
-            unimplemented!("Setting avatar requires ProfileCipherStream")
-        }
+        // A new avatar is encrypted whole before it is uploaded.
+        let retain = matches!(avatar, AvatarWrite::RetainAvatar);
+        let mut encrypted_avatar = match avatar {
+            AvatarWrite::NewAvatar(reader) => {
+                let mut plaintext = Vec::new();
+                std::io::Read::read_to_end(reader, &mut plaintext)
+                    .map_err(|_| ProfileCipherError::EncryptionError)?;
+                Some(std::io::Cursor::new(
+                    profile_cipher.encrypt_avatar(plaintext, csprng)?,
+                ))
+            },
+            AvatarWrite::RetainAvatar | AvatarWrite::NoAvatar => None,
+        };
+        let avatar = match &mut encrypted_avatar {
+            Some(cursor) => AvatarWrite::NewAvatar(cursor),
+            None if retain => AvatarWrite::RetainAvatar,
+            None => AvatarWrite::NoAvatar,
+        };
 
         let profile_key = profile_cipher.into_inner();
         let commitment = profile_key.get_commitment(aci);
@@ -586,7 +598,7 @@ impl AccountManager {
 
         Ok(self
             .websocket
-            .write_profile::<C, S>(
+            .write_profile::<std::io::Cursor<Vec<u8>>, S>(
                 &profile_key_version,
                 &name,
                 &about,

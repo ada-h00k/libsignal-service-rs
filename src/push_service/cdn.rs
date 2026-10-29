@@ -33,6 +33,13 @@ pub struct AttachmentV2UploadAttributes {
     signature: String,
 }
 
+impl AttachmentV2UploadAttributes {
+    /// Where the upload lands on the CDN.
+    pub fn key(&self) -> &str {
+        &self.key
+    }
+}
+
 impl From<crate::proto::AvatarUploadAttributes>
     for AttachmentV2UploadAttributes
 {

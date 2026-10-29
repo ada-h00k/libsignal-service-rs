@@ -171,6 +171,17 @@ impl ProfileCipher {
         self.decrypt_and_unpad(bytes)
     }
 
+    /// Avatars are not padded (Signal-Android's ProfileCipherOutputStream):
+    /// nonce, ciphertext and tag.
+    pub fn encrypt_avatar<R: RngCore + CryptoRng>(
+        &self,
+        bytes: Vec<u8>,
+        csprng: &mut R,
+    ) -> Result<Vec<u8>, ProfileCipherError> {
+        let len = bytes.len();
+        self.pad_and_encrypt(bytes, &[len], csprng)
+    }
+
     pub fn encrypt_name<'inp, R: RngCore + CryptoRng>(
         &self,
         name: impl std::borrow::Borrow<ProfileName<&'inp str>>,
@@ -241,6 +252,17 @@ mod tests {
     use crate::profile_name::ProfileName;
     use rand::Rng;
     use zkgroup::profiles::ProfileKey;
+
+    #[test]
+    fn roundtrip_avatar() {
+        let mut rng = rand::rng();
+        let cipher = ProfileCipher::new(ProfileKey::generate(rng.random()));
+        // A PNG's last bytes are not zero, so unpadding leaves it whole.
+        let avatar: Vec<u8> = (0..5000u32).map(|i| (i % 251) as u8 + 1).collect();
+        let encrypted = cipher.encrypt_avatar(avatar.clone(), &mut rng).unwrap();
+        assert_eq!(encrypted.len(), 12 + avatar.len() + 16);
+        assert_eq!(cipher.decrypt_avatar(&encrypted).unwrap(), avatar);
+    }
 
     #[test]
     fn roundtrip_name() {

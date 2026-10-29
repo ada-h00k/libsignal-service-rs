@@ -212,8 +212,9 @@ impl SignalWebSocket<websocket::Identified> {
             commitment: &commitment,
         };
 
-        // XXX this should  be a struct; cfr ProfileAvatarUploadAttributes
-        let upload_url: Result<String, _> = self
+        // With a new avatar the answer is the form to upload it with
+        // (ProfileAvatarUploadAttributes); otherwise there is nothing to read.
+        let upload_url: Result<crate::push_service::AttachmentV2UploadAttributes, _> = self
             .http_request(Method::PUT, "/v1/profile")?
             .send_json(&command)
             .await?
@@ -223,10 +224,15 @@ impl SignalWebSocket<websocket::Identified> {
             .await;
 
         match (upload_url, avatar) {
-            (_url, AvatarWrite::NewAvatar(_avatar)) => {
-                // FIXME
-                unreachable!("Uploading avatar unimplemented");
+            (Ok(form), AvatarWrite::NewAvatar(avatar)) => {
+                let key = form.key().to_owned();
+                // Profile avatars live at the CDN's root; the key carries the path.
+                self.unidentified_push_service
+                    .upload_to_cdn0("", form, "file".into(), avatar)
+                    .await?;
+                Ok(Some(key))
             },
+            (Err(error), AvatarWrite::NewAvatar(_)) => Err(error),
             // FIXME cleanup when #54883 is stable and MSRV:
             // or-patterns syntax is experimental
             // see issue #54883 <https://github.com/rust-lang/rust/issues/54883> for more information
