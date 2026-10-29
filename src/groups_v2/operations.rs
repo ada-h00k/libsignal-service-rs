@@ -950,6 +950,66 @@ impl GroupOperations {
         }
     }
 
+    /// Who may change the title, description, avatar and timer.
+    pub fn build_modify_attributes_access_action(
+        &self,
+        access: AccessRequired,
+    ) -> proto::group_change::actions::ModifyAttributesAccessControlAction {
+        proto::group_change::actions::ModifyAttributesAccessControlAction {
+            attributes_access: access.into(),
+        }
+    }
+
+    /// Who may add members.
+    pub fn build_modify_members_access_action(
+        &self,
+        access: AccessRequired,
+    ) -> proto::group_change::actions::ModifyMembersAccessControlAction {
+        proto::group_change::actions::ModifyMembersAccessControlAction {
+            members_access: access.into(),
+        }
+    }
+
+    /// Whether only administrators may send messages.
+    pub fn build_modify_announcements_only_action(
+        &self,
+        announcements_only: bool,
+    ) -> proto::group_change::actions::ModifyAnnouncementsOnlyAction {
+        proto::group_change::actions::ModifyAnnouncementsOnlyAction {
+            announcements_only,
+        }
+    }
+
+    /// Bans `service_id`: it can't join through the invite link or ask to
+    /// join any more. Removing it as a member is a separate action.
+    pub fn build_ban_member_action(
+        &self,
+        service_id: ServiceId,
+        timestamp: u64,
+    ) -> Result<
+        proto::group_change::actions::AddMemberBannedAction,
+        GroupDecodingError,
+    > {
+        Ok(proto::group_change::actions::AddMemberBannedAction {
+            added: Some(proto::MemberBanned {
+                user_id: self.encrypt_service_id(service_id)?,
+                timestamp,
+            }),
+        })
+    }
+
+    pub fn build_unban_member_action(
+        &self,
+        service_id: ServiceId,
+    ) -> Result<
+        proto::group_change::actions::DeleteMemberBannedAction,
+        GroupDecodingError,
+    > {
+        Ok(proto::group_change::actions::DeleteMemberBannedAction {
+            deleted_user_id: self.encrypt_service_id(service_id)?,
+        })
+    }
+
     /// A new password makes the links given out so far useless.
     /// See `GroupInviteLink::new_password`.
     pub fn build_modify_invite_link_password_action(
@@ -1400,6 +1460,24 @@ mod tests {
             .decrypt_service_id(&encrypted)
             .expect("decrypt_service_id should succeed");
         assert_eq!(decrypted, service_id);
+    }
+
+    #[test]
+    fn ban_and_unban_encrypt_the_service_id() {
+        let ops = create_group_operations();
+        let service_id: ServiceId = ServiceId::parse_from_service_id_string(
+            "550e8400-e29b-41d4-a716-446655440000",
+        )
+        .expect("valid service ID");
+        let ban = ops.build_ban_member_action(service_id, 42).unwrap();
+        let banned = ops.decrypt_banned_member(ban.added.unwrap()).unwrap();
+        assert_eq!(banned.user_id, service_id);
+        assert_eq!(banned.timestamp, 42);
+        let unban = ops.build_unban_member_action(service_id).unwrap();
+        assert_eq!(
+            ops.decrypt_service_id(&unban.deleted_user_id).unwrap(),
+            service_id
+        );
     }
 
     #[test]
