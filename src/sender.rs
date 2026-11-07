@@ -493,8 +493,17 @@ where
             results.push(result);
         }
 
+        // Only ordinary messages and edits have a multi-device sent transcript.
+        // Typing indicators, receipts, and other transient group events are sent to
+        // group members but are intentionally not synchronized to our own devices.
+        // In particular, do not ask create_multi_device_sent_transcript_content()
+        // for a TypingMessage: it correctly returns None for that message type.
+        let syncable = matches!(
+            &content_body,
+            ContentBody::DataMessage(_) | ContentBody::EditMessage(_)
+        );
         // we only need to send a synchronization message once
-        if needs_sync_in_results || self.is_multi_device().await {
+        if syncable && (needs_sync_in_results || self.is_multi_device().await) {
             if let Some(sync_message) = self
                 .create_multi_device_sent_transcript_content(
                     None,
@@ -518,8 +527,6 @@ where
                 {
                     error!(%error, "failed to send a synchronization message");
                 }
-            } else {
-                error!("could not create sync message from a group message")
             }
         }
 
