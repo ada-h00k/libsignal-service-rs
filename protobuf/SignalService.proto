@@ -325,6 +325,7 @@ message DataMessage {
     repeated PostalAddress address = 5;
     optional Avatar avatar = 6;
     optional string organization = 7;
+    optional bytes aciBinary = 8; // 16-byte UUID
   }
 
   message Sticker {
